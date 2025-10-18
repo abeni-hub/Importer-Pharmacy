@@ -46,9 +46,9 @@ class Medicine(models.Model):
     expire_date = models.DateField()
     buying_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # selling price
-    stock = models.IntegerField(default=0)
+    #stock = models.IntegerField(default=0)
     stock_in_unit = models.IntegerField(default=0, help_text="Stock count per individual unit (e.g., bottle, strip, etc.)")
-    stock_in_carton = models.IntegerField(default=0, help_text="Number of cartons or boxes in stock")
+    #stock_in_carton = models.IntegerField(default=0, help_text="Number of cartons or boxes in stock")
     stock_carton = models.PositiveIntegerField(default=0)
     units_per_carton = models.PositiveIntegerField(default=1)
     stock_in_unit = models.PositiveIntegerField(default=0)
@@ -72,7 +72,8 @@ class Medicine(models.Model):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
 
     def is_out_of_stock(self):
-        return self.stock <= 0
+        total_units = (self.stock_carton * self.units_per_carton) + self.stock_in_unit
+        return total_units <= 0
 
     def is_expired(self):
         return timezone.localdate() > self.expire_date
@@ -84,7 +85,9 @@ class Medicine(models.Model):
         return float(self.price) - float(self.buying_price)
 
     def total_profit(self):
-        return self.profit_per_item() * self.stock
+       total_units = (self.stock_carton * self.units_per_carton) + self.stock_in_unit
+       return self.profit_per_item() * total_units
+
     @property
     def total_stock_units(self):
         return (self.stock_carton * self.units_per_carton) + self.stock_in_unit
