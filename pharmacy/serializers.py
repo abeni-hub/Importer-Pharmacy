@@ -53,7 +53,7 @@ class MedicineSerializer(serializers.ModelSerializer):
             "profit_per_item",
             "stock_carton",
             "units_per_carton",
-            "stock_unit",
+            "stock_in_unit",
             "total_stock_units",
             "low_stock_threshold",
             "unit",
@@ -129,8 +129,8 @@ class SaleCreateItemSerializer(serializers.Serializer):
 
 
 class SaleSerializer(serializers.ModelSerializer):
-    items = SaleItemSerializer(many=True, read_only=True)
-    input_items = SaleCreateItemSerializer(many=True, write_only=True, required=True)
+    items = serializers.SerializerMethodField(read_only=True)
+    input_items = serializers.ListField(write_only=True, required=True)
     sold_by_username = serializers.CharField(source="sold_by.username", read_only=True)
     discounted_by_username = serializers.CharField(source="discounted_by.username", read_only=True)
 
@@ -145,8 +145,18 @@ class SaleSerializer(serializers.ModelSerializer):
             "items", "input_items",
         ]
         read_only_fields = [
-            "id", "sale_date", "base_price", "discounted_amount", "total_amount",
-            "items", "sold_by", "discounted_by"
+            "id", "sale_date", "base_price", "discounted_amount",
+            "total_amount", "items", "sold_by", "discounted_by"
+        ]
+
+    def get_items(self, obj):
+        return [
+            {
+                "medicine": item.medicine.item_name,
+                "quantity": item.quantity,
+                "price": str(item.price),
+            }
+            for item in obj.items.all()
         ]
 
     # ------------------------------
@@ -156,7 +166,7 @@ class SaleSerializer(serializers.ModelSerializer):
         if value is None:
             return Decimal("0.00")
         if value < 0 or value > 100:
-            raise serializers.ValidationError("discount_percentage must be between 0 and 100.")
+            raise serializers.ValidationError("Discount percentage must be between 0 and 100.")
         return value
 
     def validate(self, attrs):
@@ -166,18 +176,80 @@ class SaleSerializer(serializers.ModelSerializer):
         return attrs
 
     # ------------------------------
-    # CORE BUSINESS LOGIC
+    # CORE STOCK LOGIC
+    # ------------------------------
+    def adjust_stock(self, medicine, qty, sale_type):
+        """
+        Adjust stock levels for a medicine during sale.
+        Keeps carton and unit values consistent.
+        """
+
+        units_per_carton = medicine.units_per_carton or 0
+        total_units_before = (medicine.stock_carton * units_per_carton) + medicine.stock_in_unit
+
+        # Determine required units
+        required_units = qty * units_per_carton if sale_type == "carton" else qty
+
+        # Validate stock
+        if total_units_before < required_units:
+            raise serializers.ValidationError({
+                "input_items": f"Not enough stock for {medicine.brand_name}. "
+                               f"Available: {total_units_before} units, requested: {required_units} units."
+            })
+
+        # ------------------------------
+        # SALE BY CARTON
+        # ------------------------------
+        if sale_type == "carton":
+            # Reduce carton count
+            medicine.stock_carton -= qty
+            # Also reduce loose units equivalent to cartons
+            medicine.stock_in_unit -= (qty * units_per_carton)
+            # Prevent negatives
+            if medicine.stock_in_unit < 0:
+                medicine.stock_in_unit = 0
+
+        # ------------------------------
+        # SALE BY UNIT
+        # ------------------------------
+        elif sale_type == "unit":
+            if medicine.stock_in_unit >= qty:
+                # Enough loose units
+                medicine.stock_in_unit -= qty
+            else:
+                # Break cartons if needed
+                needed_units = qty - medicine.stock_in_unit
+                cartons_to_break = (needed_units + units_per_carton - 1) // units_per_carton
+
+                if medicine.stock_carton < cartons_to_break:
+                    raise serializers.ValidationError({
+                        "input_items": f"Not enough cartons to break for {medicine.brand_name}. "
+                                       f"Available cartons: {medicine.stock_carton}."
+                    })
+
+                medicine.stock_carton -= cartons_to_break
+                borrowed_units = cartons_to_break * units_per_carton
+                medicine.stock_in_unit = borrowed_units - needed_units
+
+        # ------------------------------
+        # FINAL UPDATE AND SAVE
+        # ------------------------------
+        total_units_after = (medicine.stock_carton * units_per_carton) + medicine.stock_in_unit
+        medicine.is_out_of_stock = total_units_after <= 0
+        medicine.save()
+
+    # ------------------------------
+    # CREATE SALE ITEMS & UPDATE STOCK
     # ------------------------------
     def create_sale_items_and_adjust_stock(self, sale, items, request_user):
         created_items = []
 
-        for idx, it in enumerate(items):
-            med_id = it.get("medicine")
-            qty = int(it.get("quantity"))
-            sale_type = it.get("sale_type", "unit")
-            provided_price = it.get("price", None)
+        for idx, item in enumerate(items):
+            med_id = item.get("medicine")
+            qty = int(item.get("quantity"))
+            sale_type = item.get("sale_type", "unit")
+            provided_price = item.get("price", None)
 
-            # Fetch medicine with lock
             try:
                 medicine = Medicine.objects.select_for_update().get(id=med_id)
             except Medicine.DoesNotExist:
@@ -185,60 +257,20 @@ class SaleSerializer(serializers.ModelSerializer):
                     "input_items": f"Medicine {med_id} does not exist (item index {idx})."
                 })
 
-            # Calculate total stock in units
-            total_units = (medicine.stock_carton * medicine.units_per_carton) + medicine.stock_in_unit
+            # Adjust stock
+            self.adjust_stock(medicine, qty, sale_type)
 
-            # ------------------------------
-            # Handle sale by CARTON
-            # ------------------------------
-            if sale_type == "carton":
-                if medicine.stock_carton < qty:
-                    raise serializers.ValidationError({
-                        "input_items": f"Not enough cartons for {medicine.brand_name}. Available: {medicine.stock_carton}, requested: {qty}."
-                    })
-                # Deduct cartons and equivalent units
-                medicine.stock_carton -= qty
-                deducted_units = qty * medicine.units_per_carton
-                total_units -= deducted_units
-
-            # ------------------------------
-            # Handle sale by UNIT
-            # ------------------------------
-            elif sale_type == "unit":
-                if total_units < qty:
-                    raise serializers.ValidationError({
-                        "input_items": f"Not enough stock for {medicine.brand_name}. Available: {total_units} units, requested: {qty} units."
-                    })
-
-                # If enough units in stock, deduct directly
-                if medicine.stock_in_unit >= qty:
-                    medicine.stock_in_unit -= qty
-                else:
-                    # Borrow from cartons
-                    needed = qty - medicine.stock_in_unit
-                    cartons_needed = (needed + medicine.units_per_carton - 1) // medicine.units_per_carton
-
-                    if medicine.stock_carton < cartons_needed:
-                        raise serializers.ValidationError({
-                            "input_items": f"Not enough stock for {medicine.brand_name}. Available: {total_units} units, requested: {qty} units."
-                        })
-
-                    # Deduct cartons and recalculate unit stock
-                    medicine.stock_carton -= cartons_needed
-                    medicine.stock_in_unit += cartons_needed * medicine.units_per_carton - qty
-
-            # ------------------------------
-            # Determine price and create SaleItem
-            # ------------------------------
+            # Use provided price or default
             unit_price = Decimal(provided_price) if provided_price is not None else medicine.price
+
+            # Create SaleItem
             sale_item = SaleItem.objects.create(
                 sale=sale,
                 medicine=medicine,
                 quantity=qty,
-                price=unit_price
+                price=unit_price,
             )
 
-            medicine.save()
             created_items.append(sale_item)
 
         return created_items
@@ -252,7 +284,7 @@ class SaleSerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
         items = validated_data.pop("input_items", [])
 
-        # Create base Sale record
+        # Create sale record
         sale = Sale.objects.create(
             sold_by=user,
             customer_name=validated_data.get("customer_name"),
@@ -264,27 +296,25 @@ class SaleSerializer(serializers.ModelSerializer):
             total_amount=Decimal("0.00"),
         )
 
-        # Process items and update stocks
+        # Create sale items and adjust stock
         created_items = self.create_sale_items_and_adjust_stock(sale, items, user)
 
-        # Compute total prices
+        # Compute totals
         base_price = sum(Decimal(i.quantity) * i.price for i in created_items)
         discount_pct = validated_data.get("discount_percentage", Decimal("0.00")) or Decimal("0.00")
         discounted_amount = (base_price * (discount_pct / Decimal("100.00"))).quantize(Decimal("0.01"))
         total_amount = (base_price - discounted_amount).quantize(Decimal("0.01"))
 
-        # Update Sale totals
+        # Update sale totals
         sale.base_price = base_price.quantize(Decimal("0.01"))
         sale.discounted_amount = discounted_amount
         sale.total_amount = total_amount
 
-        # Set discounted_by if applicable
         if discount_pct > 0 and user and user.is_authenticated:
             sale.discounted_by = user
 
         sale.save()
         return sale
-    
 class SettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Setting
