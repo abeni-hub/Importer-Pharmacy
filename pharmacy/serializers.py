@@ -139,38 +139,41 @@ class SaleSerializer(serializers.ModelSerializer):
     class Meta:
         model = Sale
         fields = [
-            "id","voucher_number","code_no", "sold_by", "sold_by_username",
-            "customer_name", "customer_phone", "sale_date","TIN_number",
+            "id", "voucher_number", "code_no", "sold_by", "sold_by_username",
+            "customer_name", "customer_phone", "sale_date", "TIN_number",
             "payment_method", "discount_percentage",
             "base_price", "discounted_amount", "total_amount",
             "discounted_by", "discounted_by_username",
             "items", "input_items",
         ]
         read_only_fields = [
-            "id", "code_no","sale_date", "base_price", "discounted_amount",
+            "id", "code_no", "sale_date", "base_price", "discounted_amount",
             "total_amount", "items", "sold_by", "discounted_by"
         ]
+
     def get_code_no(self, obj):
-        """Fetch department code from the medicine's department."""
+        """Fetch department code from the first medicine’s department."""
         first_item = obj.items.first()
         if first_item and first_item.medicine.department:
             return first_item.medicine.department.code
-        return None  # Or "UNKNOWN" if you prefer a default
+        return None
+
     def get_items(self, obj):
+        """
+        Each sale item includes medicine info + department code_no.
+        """
         return [
             {
                 "medicine": item.medicine.item_name,
-
-                "quantity": item.quantity,
-                "price": str(item.price),
                 "batch_no": item.medicine.batch_no,
                 "expire_date": item.medicine.expire_date,
+                "code_no": item.medicine.department.code if item.medicine.department else None,
                 "quantity": item.quantity,
                 "price": str(item.price),
                 "sale_type": item.sale_type,
-                "unit_type": "carton" if item.sale_type == "carton" else "unit"
+                "unit_type": "carton" if item.sale_type == "carton" else "unit",
             }
-            for item in obj.items.all()
+            for item in obj.items.select_related("medicine__department").all()
         ]
 
     # ------------------------------
@@ -197,7 +200,6 @@ class SaleSerializer(serializers.ModelSerializer):
         Adjust stock levels for a medicine during sale.
         Keeps carton and unit values consistent.
         """
-
         units_per_carton = medicine.units_per_carton or 0
         total_units_before = (medicine.stock_carton * units_per_carton) + medicine.stock_in_unit
 
@@ -215,11 +217,8 @@ class SaleSerializer(serializers.ModelSerializer):
         # SALE BY CARTON
         # ------------------------------
         if sale_type == "carton":
-            # Reduce carton count
             medicine.stock_carton -= qty
-            # Also reduce loose units equivalent to cartons
             medicine.stock_in_unit -= (qty * units_per_carton)
-            # Prevent negatives
             if medicine.stock_in_unit < 0:
                 medicine.stock_in_unit = 0
 
@@ -228,10 +227,8 @@ class SaleSerializer(serializers.ModelSerializer):
         # ------------------------------
         elif sale_type == "unit":
             if medicine.stock_in_unit >= qty:
-                # Enough loose units
                 medicine.stock_in_unit -= qty
             else:
-                # Break cartons if needed
                 needed_units = qty - medicine.stock_in_unit
                 cartons_to_break = (needed_units + units_per_carton - 1) // units_per_carton
 
@@ -283,7 +280,6 @@ class SaleSerializer(serializers.ModelSerializer):
                 medicine=medicine,
                 quantity=qty,
                 price=unit_price,
-
                 sale_type=sale_type
             )
 
@@ -300,12 +296,16 @@ class SaleSerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
         items = validated_data.pop("input_items", [])
 
+        # ✅ Fix: Properly assign TIN_number if provided
+        tin_number = validated_data.get("TIN_number")
+
         # Create sale record
         sale = Sale.objects.create(
             sold_by=user,
             customer_name=validated_data.get("customer_name"),
             customer_phone=validated_data.get("customer_phone"),
             payment_method=validated_data.get("payment_method", "cash"),
+            TIN_number=tin_number,  # ✅ fixed (previously not saving)
             discount_percentage=validated_data.get("discount_percentage", Decimal("0.00")),
             base_price=Decimal("0.00"),
             discounted_amount=Decimal("0.00"),
@@ -331,6 +331,7 @@ class SaleSerializer(serializers.ModelSerializer):
 
         sale.save()
         return sale
+
 class SettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Setting

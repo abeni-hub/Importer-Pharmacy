@@ -10,9 +10,12 @@ from django.db import transaction
 from rest_framework import status
 from django.db.models import Sum, Count , F , Avg , FloatField
 from django.utils.timezone import now 
-from .pagination import CustomPagination
+from .pagination import CustomPagination 
+from django.core.paginator import Paginator
 from django.db.models.functions import TruncDate
 from decimal import Decimal
+from django.shortcuts import get_object_or_404
+from django.db.models import Q
 
 
 
@@ -143,6 +146,10 @@ class SaleViewSet(viewsets.ModelViewSet):
     serializer_class = SaleSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = CustomPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+
+    ordering_fields = ['sale_date', 'total_amount']
+    search_fields = ['customer_name', 'customer_phone', 'voucher_number']
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -169,6 +176,39 @@ class SaleViewSet(viewsets.ModelViewSet):
             sale = serializer.save()
         out_serializer = self.get_serializer(sale)
         return Response(out_serializer.data, status=status.HTTP_201_CREATED)
+    @action(detail=False, methods=['get'], url_path='sold-medicines')
+    def sold_medicines(self, request):
+        """
+        Returns paginated list of sold medicines filtered by customer, phone, or voucher_number.
+        """
+        page_number = int(request.query_params.get('pageNumber', 1))
+        page_size = int(request.query_params.get('pageSize', 10))
+        search = request.query_params.get('search', '')
+        voucher_number = request.query_params.get('voucher_number', '')
+
+        sales = Sale.objects.all().order_by('-sale_date')
+
+        # 🔍 Filter by key fields
+        if search:
+            sales = sales.filter(
+                Q(customer_name__icontains=search) |
+                Q(customer_phone__icontains=search) |
+                Q(voucher_number__icontains=search)
+            )
+        if voucher_number:
+            sales = sales.filter(voucher_number__icontains=voucher_number)
+
+        paginator = Paginator(sales.distinct(), page_size)
+        current_page = paginator.get_page(page_number)
+
+        serializer = self.get_serializer(current_page, many=True)
+
+        return Response({
+            "page": page_number,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "results": serializer.data
+        }, status=status.HTTP_200_OK)
 class DashboardViewSet(viewsets.ViewSet):
     """
     Dashboard API: Provides stock, sales, department, and profit summaries
