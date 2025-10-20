@@ -180,10 +180,21 @@ class DashboardViewSet(viewsets.ViewSet):
         today = now().date()
         near_expiry_threshold = today + timedelta(days=30)
 
-        # --- Stock summaries ---
+        # Compute total stock (in units)
         total_medicines = Medicine.objects.count()
-        low_stock = Medicine.objects.filter(stock__lte=10, stock__gt=0).count()
-        stock_out = Medicine.objects.filter(stock=0).count()
+
+        # Calculate total available units for each medicine
+        medicines = Medicine.objects.all()
+        low_stock = 0
+        stock_out = 0
+
+        for med in medicines:
+            total_units = (med.stock_carton * (med.units_per_carton or 0)) + (med.stock_in_unit or 0)
+            if total_units <= 0:
+                stock_out += 1
+            elif total_units <= 10:
+                low_stock += 1
+
         expired = Medicine.objects.filter(expire_date__lt=today).count()
         near_expiry = Medicine.objects.filter(
             expire_date__gte=today, expire_date__lte=near_expiry_threshold
@@ -195,29 +206,21 @@ class DashboardViewSet(viewsets.ViewSet):
             .aggregate(total=Sum("quantity"))
             .get("total") or 0
         )
-        total_sales_qty = (
-            SaleItem.objects.aggregate(total=Sum("quantity")).get("total") or 0
-        )
+        total_sales_qty = SaleItem.objects.aggregate(total=Sum("quantity")).get("total") or 0
 
         revenue_today = (
             Sale.objects.filter(sale_date__date=today)
             .aggregate(revenue=Sum("total_amount"))
             .get("revenue") or 0
         )
-        total_revenue = (
-            Sale.objects.aggregate(revenue=Sum("total_amount")).get("revenue") or 0
-        )
+        total_revenue = Sale.objects.aggregate(revenue=Sum("total_amount")).get("revenue") or 0
 
         # --- Profit summaries ---
-        total_profit = (
-            Medicine.objects.aggregate(
-                profit=Sum(
-                    (F("price") - F("buying_price")) * F("stock"),
-                    output_field=FloatField(),
-                )
-            ).get("profit")
-            or 0
-        )
+        total_profit = 0
+        for med in medicines:
+            total_units = (med.stock_carton * (med.units_per_carton or 0)) + (med.stock_in_unit or 0)
+            profit_per_unit = float(med.price - med.buying_price)
+            total_profit += profit_per_unit * total_units
 
         today_profit = (
             SaleItem.objects.annotate(
@@ -242,7 +245,8 @@ class DashboardViewSet(viewsets.ViewSet):
             .annotate(
                 total=Count("id"),
                 total_profit=Sum(
-                    (F("price") - F("buying_price")) * F("stock"),
+                    (F("price") - F("buying_price"))
+                    * ((F("stock_carton") * F("units_per_carton")) + F("stock_in_unit")),
                     output_field=FloatField(),
                 ),
             )
@@ -265,7 +269,7 @@ class DashboardViewSet(viewsets.ViewSet):
             },
             "profit": {
                 "today_profit": today_profit,
-                "total_profit": total_profit,
+                "total_profit": round(total_profit, 2),
             },
             "top_selling": list(top_selling),
             "departments": list(department_stats),
@@ -278,24 +282,26 @@ class DashboardViewSet(viewsets.ViewSet):
         last_week = today - timedelta(days=7)
         near_expiry_threshold = today + timedelta(days=30)
 
+        medicines = Medicine.objects.all()
+
+        # Compute inventory value & profit based on cartons + units
+        inventory_value = 0
+        total_profit = 0
+        for med in medicines:
+            total_units = (med.stock_carton * (med.units_per_carton or 0)) + (med.stock_in_unit or 0)
+            inventory_value += float(med.price) * total_units
+            total_profit += float(med.price - med.buying_price) * total_units
+
         total_revenue = Sale.objects.aggregate(total=Sum("total_amount")).get("total") or 0
         total_transactions = Sale.objects.count()
         avg_order_value = Sale.objects.aggregate(avg=Avg("total_amount")).get("avg") or 0
-        inventory_value = (
-            Medicine.objects.aggregate(total=Sum(F("stock") * F("price"))).get("total") or 0
+
+        profit_margin = (
+            (Decimal(str(total_profit)) / Decimal(str(inventory_value)) * 100)
+            if inventory_value > 0 else Decimal(0)
         )
 
-        total_profit = (
-            Medicine.objects.aggregate(
-                profit=Sum(
-                    (F("price") - F("buying_price")) * F("stock"),
-                    output_field=FloatField(),
-                )
-            ).get("profit")
-            or 0
-        )
-
-        profit_margin = (Decimal(str(total_profit)) / inventory_value * 100) if inventory_value > 0 else Decimal(0)
+        # --- Sales trend (last 7 days) ---
         sales_trend = (
             Sale.objects.filter(sale_date__date__gte=last_week)
             .annotate(day=TruncDate("sale_date"))
@@ -304,30 +310,45 @@ class DashboardViewSet(viewsets.ViewSet):
             .order_by("day")
         )
 
+        # --- Inventory by department ---
         inventory_by_category = (
             Medicine.objects.values("department__name")
             .annotate(
-                value=Sum(F("stock") * F("price")),
+                value=Sum(
+                    (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("price"),
+                    output_field=FloatField(),
+                ),
                 profit=Sum(
-                    (F("price") - F("buying_price")) * F("stock"),
+                    (F("price") - F("buying_price"))
+                    * (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")),
                     output_field=FloatField(),
                 ),
             )
             .order_by("department__name")
         )
 
+        # --- Top selling medicines ---
         top_selling = (
             SaleItem.objects.values("medicine__brand_name")
             .annotate(total_sold=Sum("quantity"))
             .order_by("-total_sold")[:5]
         )
 
-        low_stock = Medicine.objects.filter(stock__lte=10, stock__gt=0)
-        stock_out = Medicine.objects.filter(stock=0)
-        near_expiry = Medicine.objects.filter(
-            expire_date__gte=today, expire_date__lte=near_expiry_threshold
-        )
+        # --- Stock alerts ---
+        low_stock = []
+        stock_out = []
+        near_expiry = []
 
+        for med in medicines:
+            total_units = (med.stock_carton * (med.units_per_carton or 0)) + (med.stock_in_unit or 0)
+            if total_units <= 0:
+                stock_out.append({"brand_name": med.brand_name})
+            elif total_units <= 10:
+                low_stock.append({"brand_name": med.brand_name, "stock": total_units})
+            if today <= med.expire_date <= near_expiry_threshold:
+                near_expiry.append({"brand_name": med.brand_name, "expire_date": med.expire_date})
+
+        # Weekly summary
         week_sales = (
             Sale.objects.filter(sale_date__date__gte=last_week)
             .aggregate(total=Sum("total_amount"))
@@ -335,7 +356,7 @@ class DashboardViewSet(viewsets.ViewSet):
         )
         week_transactions = Sale.objects.filter(sale_date__date__gte=last_week).count()
 
-        total_products = Medicine.objects.count()
+        total_products = medicines.count()
         inventory_turnover = (
             float(total_revenue) / float(inventory_value) if inventory_value > 0 else 0
         )
@@ -346,16 +367,16 @@ class DashboardViewSet(viewsets.ViewSet):
                 "total_transactions": total_transactions,
                 "avg_order_value": avg_order_value,
                 "inventory_value": inventory_value,
-                "total_profit": total_profit,
+                "total_profit": round(total_profit, 2),
                 "profit_margin": round(profit_margin, 2),
             },
             "sales_trend": list(sales_trend),
             "inventory_by_category": list(inventory_by_category),
             "top_selling": list(top_selling),
             "stock_alerts": {
-                "low_stock": list(low_stock.values("brand_name", "stock")),
-                "stock_out": list(stock_out.values("brand_name")),
-                "near_expiry": list(near_expiry.values("brand_name", "expire_date")),
+                "low_stock": low_stock,
+                "stock_out": stock_out,
+                "near_expiry": near_expiry,
             },
             "weekly_summary": {
                 "week_sales": week_sales,
@@ -363,9 +384,9 @@ class DashboardViewSet(viewsets.ViewSet):
             },
             "inventory_health": {
                 "total_products": total_products,
-                "low_stock": low_stock.count(),
-                "near_expiry": near_expiry.count(),
-                "stock_out": stock_out.count(),
+                "low_stock": len(low_stock),
+                "near_expiry": len(near_expiry),
+                "stock_out": len(stock_out),
             },
             "performance_metrics": {
                 "inventory_turnover": round(inventory_turnover, 2),

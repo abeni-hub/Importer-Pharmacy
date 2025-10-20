@@ -52,7 +52,6 @@ class Medicine(models.Model):
     stock_carton = models.PositiveIntegerField(default=0)
     units_per_carton = models.PositiveIntegerField(default=1)
     stock_in_unit = models.PositiveIntegerField(default=0)
-    stock_unit = models.CharField(max_length=50, default="unit") 
     low_stock_threshold = models.IntegerField(default=10)
     company_name = models.CharField(max_length=255, blank=True, null=True)
     FSNO = models.CharField(blank=True, null=True)
@@ -133,12 +132,20 @@ class Sale(models.Model):
         return f"Sale {self.id} by {self.sold_by or 'Unknown'} on {self.sale_date}"
 
 class SaleItem(models.Model):
+    SALE_TYPE_CHOICES = [
+        ("unit", "Unit"),
+        ("carton", "Carton"),
+    ]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name="items")
     medicine = models.ForeignKey("Medicine", on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
     # price saved at sale time (unit price)
     price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    sale_type = models.CharField(max_length=10, choices=SALE_TYPE_CHOICES, default="unit")
+
+    def __str__(self):
+        return f"{self.medicine.item_name} ({self.quantity} {self.sale_type})"
 
     def __str__(self):
         return f"{self.quantity} x {self.medicine.brand_name} @ {self.price}"

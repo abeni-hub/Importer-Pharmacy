@@ -153,8 +153,15 @@ class SaleSerializer(serializers.ModelSerializer):
         return [
             {
                 "medicine": item.medicine.item_name,
+
                 "quantity": item.quantity,
                 "price": str(item.price),
+                "batch_no": item.medicine.batch_no,
+                "expire_date": item.medicine.expire_date,
+                "quantity": item.quantity,
+                "price": str(item.price),
+                "sale_type": item.sale_type,
+                "unit_type": "carton" if item.sale_type == "carton" else "unit"
             }
             for item in obj.items.all()
         ]
@@ -269,6 +276,8 @@ class SaleSerializer(serializers.ModelSerializer):
                 medicine=medicine,
                 quantity=qty,
                 price=unit_price,
+
+                sale_type=sale_type
             )
 
             created_items.append(sale_item)
