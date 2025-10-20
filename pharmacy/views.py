@@ -158,17 +158,7 @@ class SaleViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """
-        Payload example:
-        {
-          "customer_name": "John Doe",
-          "customer_phone": "0911...",
-          "payment_method": "cash",
-          "discount_percentage": "5.0",
-          "input_items": [
-            { "medicine": "uuid-of-medicine-1", "quantity": 2 },
-            { "medicine": "uuid-of-medicine-2", "quantity": 1, "price": "15.50" }
-          ]
-        }
+        Create a new sale record.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -176,6 +166,7 @@ class SaleViewSet(viewsets.ModelViewSet):
             sale = serializer.save()
         out_serializer = self.get_serializer(sale)
         return Response(out_serializer.data, status=status.HTTP_201_CREATED)
+
     @action(detail=False, methods=['get'], url_path='sold-medicines')
     def sold_medicines(self, request):
         """
@@ -183,22 +174,32 @@ class SaleViewSet(viewsets.ModelViewSet):
         """
         page_number = int(request.query_params.get('pageNumber', 1))
         page_size = int(request.query_params.get('pageSize', 10))
-        search = request.query_params.get('search', '')
-        voucher_number = request.query_params.get('voucher_number', '')
+        search = request.query_params.get('search', '').strip()
+        voucher_number = request.query_params.get('voucher_number', '').strip()
 
+        # 🔍 Base queryset
         sales = Sale.objects.all().order_by('-sale_date')
 
-        # 🔍 Filter by key fields
+        # Combined filtering logic
+        filters_q = Q()
+
         if search:
-            sales = sales.filter(
+            filters_q |= (
                 Q(customer_name__icontains=search) |
                 Q(customer_phone__icontains=search) |
                 Q(voucher_number__icontains=search)
             )
-        if voucher_number:
-            sales = sales.filter(voucher_number__icontains=voucher_number)
 
-        paginator = Paginator(sales.distinct(), page_size)
+        if voucher_number:
+            filters_q &= Q(voucher_number__icontains=voucher_number)
+
+        if filters_q:
+            sales = sales.filter(filters_q)
+
+        # ✅ Avoid duplicates
+        sales = sales.distinct()
+
+        paginator = Paginator(sales, page_size)
         current_page = paginator.get_page(page_number)
 
         serializer = self.get_serializer(current_page, many=True)
