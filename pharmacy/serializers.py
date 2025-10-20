@@ -133,22 +133,29 @@ class SaleSerializer(serializers.ModelSerializer):
     input_items = serializers.ListField(write_only=True, required=True)
     sold_by_username = serializers.CharField(source="sold_by.username", read_only=True)
     discounted_by_username = serializers.CharField(source="discounted_by.username", read_only=True)
+    code_no = serializers.SerializerMethodField(read_only=True)
+    voucher_number = serializers.CharField(read_only=True)
 
     class Meta:
         model = Sale
         fields = [
-            "id", "sold_by", "sold_by_username",
-            "customer_name", "customer_phone", "sale_date",
+            "id","voucher_number","code_no", "sold_by", "sold_by_username",
+            "customer_name", "customer_phone", "sale_date","TIN_number",
             "payment_method", "discount_percentage",
             "base_price", "discounted_amount", "total_amount",
             "discounted_by", "discounted_by_username",
             "items", "input_items",
         ]
         read_only_fields = [
-            "id", "sale_date", "base_price", "discounted_amount",
+            "id", "code_no","sale_date", "base_price", "discounted_amount",
             "total_amount", "items", "sold_by", "discounted_by"
         ]
-
+    def get_code_no(self, obj):
+        """Fetch department code from the medicine's department."""
+        first_item = obj.items.first()
+        if first_item and first_item.medicine.department:
+            return first_item.medicine.department.code
+        return None  # Or "UNKNOWN" if you prefer a default
     def get_items(self, obj):
         return [
             {

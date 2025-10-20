@@ -104,11 +104,12 @@ PAYMENT_METHOD_CHOICES = [
 
 class Sale(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    voucher_number = models.CharField(max_length=20, unique=True, editable=False)
     sold_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     customer_name = models.CharField(max_length=255, blank=True, null=True)
     customer_phone = models.CharField(max_length=20, blank=True, null=True)
     sale_date = models.DateTimeField(auto_now_add=True)
-
+    TIN_number = models.CharField(max_length=20, blank=True, null=True)
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, default='cash')
 
     discount_percentage = models.DecimalField(
@@ -130,6 +131,31 @@ class Sale(models.Model):
 
     def __str__(self):
         return f"Sale {self.id} by {self.sold_by or 'Unknown'} on {self.sale_date}"
+    def __str__(self):
+        return f"Sale {self.voucher_number or self.id} by {self.sold_by or 'Unknown'} on {self.sale_date}"
+
+    # --------------------------
+    # AUTO VOUCHER NUMBER LOGIC
+    # --------------------------
+    @staticmethod
+    def generate_voucher_number():
+        """Generate sequential voucher numbers per day."""
+        today_str = timezone.now().strftime("%Y%m%d")
+        prefix = f"SLS-{today_str}"
+        last_sale = Sale.objects.filter(voucher_number__startswith=prefix).order_by('-voucher_number').first()
+
+        if last_sale and last_sale.voucher_number.split('-')[-1].isdigit():
+            last_number = int(last_sale.voucher_number.split('-')[-1])
+        else:
+            last_number = 0
+
+        new_number = last_number + 1
+        return f"{prefix}-{new_number:04d}"
+
+    def save(self, *args, **kwargs):
+        if not self.voucher_number:
+            self.voucher_number = self.generate_voucher_number()
+        super().save(*args, **kwargs)
 
 class SaleItem(models.Model):
     SALE_TYPE_CHOICES = [
