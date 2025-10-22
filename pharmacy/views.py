@@ -16,7 +16,10 @@ from django.db.models.functions import TruncDate
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-
+import pandas as pd
+from openpyxl import Workbook
+from io import BytesIO
+from django.http import HttpResponse
 
 
 class DepartmentViewSet(viewsets.ModelViewSet):
@@ -138,7 +141,29 @@ class MedicineViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    @action(detail=False, methods=['get'], url_path='export-excel')
+    def export_excel(self, request):
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        queryset = self.get_queryset()
 
+        if start_date and end_date:
+            queryset = queryset.filter(created_at__range=[start_date, end_date])
+
+        df = pd.DataFrame(list(queryset.values()))
+        if df.empty:
+            return Response({"detail": "No medicine records found."}, status=404)
+
+        buffer = BytesIO()
+        df.to_excel(buffer, index=False, engine='openpyxl')
+        buffer.seek(0)
+
+        response = HttpResponse(
+            buffer,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = 'attachment; filename="medicines.xlsx"'
+        return response
 
 # ---------------- SALE VIEWSET ----------------
 class SaleViewSet(viewsets.ModelViewSet):
@@ -210,6 +235,65 @@ class SaleViewSet(viewsets.ModelViewSet):
             "total_items": paginator.count,
             "results": serializer.data
         }, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=['get'], url_path='export-excel')
+    def export_sales_excel(self, request):
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        queryset = self.get_queryset()
+
+        if start_date and end_date:
+            queryset = queryset.filter(sale_date__range=[start_date, end_date])
+
+        df = pd.DataFrame(list(queryset.values()))
+        if df.empty:
+            return Response({"detail": "No sales records found."}, status=404)
+
+        buffer = BytesIO()
+        df.to_excel(buffer, index=False, engine='openpyxl')
+        buffer.seek(0)
+
+        response = HttpResponse(
+            buffer,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = 'attachment; filename="sales.xlsx"'
+        return response
+
+    # ✅ Export sold medicines (SaleItem) to Excel (downloadable)
+    @action(detail=False, methods=['get'], url_path='sold-medicines-export')
+    def export_sold_medicines_excel(self, request):
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        items = SaleItem.objects.select_related('medicine', 'sale').all()
+
+        if start_date and end_date:
+            items = items.filter(sale__sale_date__range=[start_date, end_date])
+
+        data = [{
+            "voucher_number": item.sale.voucher_number,
+            "customer": item.sale.customer_name,
+            "medicine": item.medicine.brand_name if item.medicine else None,
+            "quantity": item.quantity,
+            "unit_price": float(item.price),
+            "total_price": float(item.price) * item.quantity,
+            "sale_date": item.sale.sale_date
+        } for item in items]
+
+        if not data:
+            return Response({"detail": "No sold medicine records found."}, status=404)
+
+        df = pd.DataFrame(data)
+        buffer = BytesIO()
+        df.to_excel(buffer, index=False, engine='openpyxl')
+        buffer.seek(0)
+
+        response = HttpResponse(
+            buffer,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = 'attachment; filename="sold_medicines.xlsx"'
+        return response
 class DashboardViewSet(viewsets.ViewSet):
     """
     Dashboard API: Provides stock, sales, department, and profit summaries
