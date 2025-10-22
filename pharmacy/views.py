@@ -142,12 +142,16 @@ class MedicineViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
 
     @action(detail=False, methods=['get'], url_path='export-excel')
-    def aaas(self, request):
+    def export_excel(self, request):
         queryset = self.get_queryset()
 
         df = pd.DataFrame(list(queryset.values()))
         if df.empty:
             return Response({"detail": "No medicine records found."}, status=404)
+
+        # 🕒 Convert timezone-aware datetime columns to naive datetimes
+        for col in df.select_dtypes(include=['datetime64[ns, UTC]']).columns:
+            df[col] = df[col].dt.tz_localize(None)
 
         buffer = BytesIO()
         df.to_excel(buffer, index=False, engine='openpyxl')
@@ -159,7 +163,6 @@ class MedicineViewSet(viewsets.ModelViewSet):
         )
         response['Content-Disposition'] = 'attachment; filename="medicines.xlsx"'
         return response
-
 # ---------------- SALE VIEWSET ----------------
 class SaleViewSet(viewsets.ModelViewSet):
     queryset = Sale.objects.all().order_by("-sale_date")
@@ -232,13 +235,16 @@ class SaleViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_200_OK)
     
     @action(detail=False, methods=['get'], url_path='export-excel')
-    def export_sales_excel(self, request):
+    def export_excel(self, request):
         queryset = self.get_queryset()
-
 
         df = pd.DataFrame(list(queryset.values()))
         if df.empty:
             return Response({"detail": "No sales records found."}, status=404)
+
+        # 🕒 Convert timezone-aware datetime columns to naive datetimes
+        for col in df.select_dtypes(include=['datetime64[ns, UTC]']).columns:
+            df[col] = df[col].dt.tz_localize(None)
 
         buffer = BytesIO()
         df.to_excel(buffer, index=False, engine='openpyxl')
@@ -251,10 +257,9 @@ class SaleViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = 'attachment; filename="sales.xlsx"'
         return response
 
-    # ✅ Export sold medicines (SaleItem) to Excel (downloadable)
-    @action(detail=False, methods=['get'], url_path='sold-medicines-export')
-    def export_sold_medicines_excel(self, request):
-
+    # Export sold medicines (SaleItem) to Excel (downloadable)
+    @action(detail=False, methods=['get'], url_path='export-excel')
+    def export_excel(self, request):
         items = SaleItem.objects.select_related('medicine', 'sale').all()
 
         data = [{
@@ -271,6 +276,11 @@ class SaleViewSet(viewsets.ModelViewSet):
             return Response({"detail": "No sold medicine records found."}, status=404)
 
         df = pd.DataFrame(data)
+
+        # 🕒 Convert timezone-aware datetime columns to naive datetimes
+        for col in df.select_dtypes(include=['datetime64[ns, UTC]']).columns:
+            df[col] = df[col].dt.tz_localize(None)
+
         buffer = BytesIO()
         df.to_excel(buffer, index=False, engine='openpyxl')
         buffer.seek(0)
