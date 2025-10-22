@@ -142,13 +142,8 @@ class MedicineViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
 
     @action(detail=False, methods=['get'], url_path='export-excel')
-    def export_excel(self, request):
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
+    def aaas(self, request):
         queryset = self.get_queryset()
-
-        if start_date and end_date:
-            queryset = queryset.filter(created_at__range=[start_date, end_date])
 
         df = pd.DataFrame(list(queryset.values()))
         if df.empty:
@@ -238,12 +233,8 @@ class SaleViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'], url_path='export-excel')
     def export_sales_excel(self, request):
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
         queryset = self.get_queryset()
 
-        if start_date and end_date:
-            queryset = queryset.filter(sale_date__range=[start_date, end_date])
 
         df = pd.DataFrame(list(queryset.values()))
         if df.empty:
@@ -263,12 +254,8 @@ class SaleViewSet(viewsets.ModelViewSet):
     # ✅ Export sold medicines (SaleItem) to Excel (downloadable)
     @action(detail=False, methods=['get'], url_path='sold-medicines-export')
     def export_sold_medicines_excel(self, request):
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
-        items = SaleItem.objects.select_related('medicine', 'sale').all()
 
-        if start_date and end_date:
-            items = items.filter(sale__sale_date__range=[start_date, end_date])
+        items = SaleItem.objects.select_related('medicine', 'sale').all()
 
         data = [{
             "voucher_number": item.sale.voucher_number,
