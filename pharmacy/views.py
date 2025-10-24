@@ -51,7 +51,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
 
     # removed 'code_no' because you said you'll remove it from model
     filterset_class = MedicineFilter
-    search_fields = ['brand_name', 'generic_name', 'unit', 'batch_no']
+    search_fields = ['brand_name', 'item_name', 'unit', 'batch_no']
     ordering_fields = ['expire_date','price','stock']
 
     # ---------------- BULK CREATE ----------------

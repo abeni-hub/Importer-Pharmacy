@@ -66,6 +66,8 @@ class MedicineSerializer(serializers.ModelSerializer):
             "is_out_of_stock",
             "is_expired",
             "is_nearly_expired",
+            "low_threshold",
+            "expired_date",
             #"refill_count",
             "created_at",
             "updated_at",

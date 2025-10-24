@@ -53,6 +53,14 @@ class Medicine(models.Model):
     units_per_carton = models.PositiveIntegerField(default=1)
     stock_in_unit = models.PositiveIntegerField(default=0)
     low_stock_threshold = models.IntegerField(default=10)
+    low_threshold = models.IntegerField(
+        default=10,
+        help_text="Threshold to trigger low stock alerts (in units)."
+    )
+    expired_date = models.IntegerField(
+        default=30,
+        help_text="Number of days before expiry to trigger near-expiry alerts."
+    )
     company_name = models.CharField(max_length=255, blank=True, null=True)
     FSNO = models.CharField(blank=True, null=True)
     department = models.ForeignKey(Department,on_delete=models.SET_NULL,null=True, blank=True,related_name='medicines')
