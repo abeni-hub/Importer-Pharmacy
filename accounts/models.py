@@ -8,6 +8,6 @@ class User(AbstractUser):
         default=uuid.uuid4,
         editable=False
     )
-    role = models.CharField(max_length=50, choices=[("admin", "Admin"), ("pharmacist", "Pharmacist")])
+    role = models.CharField(max_length=50, choices=[("admin", "Admin"), ("pharmacist", "Pharmacist"),("store manager","Store Manager")], default="pharmacist")
     def __str__(self):
         return f"{self.username} ({self.role})"

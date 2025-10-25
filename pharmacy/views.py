@@ -20,6 +20,7 @@ import pandas as pd
 from openpyxl import Workbook
 from io import BytesIO
 from django.http import HttpResponse
+from datetime import date
 
 
 class DepartmentViewSet(viewsets.ModelViewSet):
@@ -53,6 +54,29 @@ class MedicineViewSet(viewsets.ModelViewSet):
     filterset_class = MedicineFilter
     search_fields = ['brand_name', 'item_name', 'unit', 'batch_no']
     ordering_fields = ['expire_date','price','stock']
+
+
+    @action(detail=False, methods=["get"], url_path="alerts")
+    def alert_expired_medicines(self, request):
+        """
+        Returns all medicines whose expired_date is today.
+        """
+        today = date.today()
+        expired_today = Medicine.objects.filter(expired_date=today)
+
+        if expired_today.exists():
+            serializer = self.get_serializer(expired_today, many=True)
+            return Response({
+                "alert": True,
+                "count": expired_today.count(),
+                "message": f"⚠️ {expired_today.count()} medicine(s) expire today ({today}).",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "alert": False,
+                "message": f"✅ No medicines expire today ({today})."
+            }, status=status.HTTP_200_OK)
 
     # ---------------- BULK CREATE ----------------
     def create(self, request, *args, **kwargs):

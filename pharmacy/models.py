@@ -57,10 +57,7 @@ class Medicine(models.Model):
         default=10,
         help_text="Threshold to trigger low stock alerts (in units)."
     )
-    expired_date = models.IntegerField(
-        default=30,
-        help_text="Number of days before expiry to trigger near-expiry alerts."
-    )
+    expired_date = models.DateField(null=True, blank=True)
     company_name = models.CharField(max_length=255, blank=True, null=True)
     FSNO = models.CharField(blank=True, null=True)
     department = models.ForeignKey(Department,on_delete=models.SET_NULL,null=True, blank=True,related_name='medicines')
