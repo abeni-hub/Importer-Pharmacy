@@ -77,6 +77,30 @@ class MedicineViewSet(viewsets.ModelViewSet):
                 "alert": False,
                 "message": f"✅ No medicines expire today ({today})."
             }, status=status.HTTP_200_OK)
+        
+    @action(detail=False, methods=["get"], url_path="alerts/lowstock")
+    def alert_low_stock_medicines(self, request):
+        """
+        Returns all medicines whose total stock is less than or equal to their low_stock_threshold.
+        """
+        low_stock_medicines = [
+            med for med in Medicine.objects.all()
+            if med.total_stock_units <= med.low_stock_threshold
+        ]
+
+        if low_stock_medicines:
+            serializer = self.get_serializer(low_stock_medicines, many=True)
+            return Response({
+                "alert": True,
+                "count": len(low_stock_medicines),
+                "message": f"⚠️ {len(low_stock_medicines)} medicine(s) are low in stock.",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "alert": False,
+                "message": "✅ All medicines have sufficient stock."
+            }, status=status.HTTP_200_OK)
 
     # ---------------- BULK CREATE ----------------
     def create(self, request, *args, **kwargs):
