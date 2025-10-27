@@ -41,9 +41,9 @@ class Medicine(models.Model):
     #code_no = models.CharField(max_length=50, unique=True)
     brand_name = models.CharField(max_length=255)
     item_name = models.CharField(max_length=255, blank=True, null=True)
-    batch_no = models.CharField(max_length=100 , unique=True)
+    batch_no = models.CharField(max_length=100 , unique=True,db_index=True)
     manufacture_date = models.DateField(null=True, blank= True)
-    expire_date = models.DateField()
+    expire_date = models.DateField(db_index=True)
     buying_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # selling price
     #stock = models.IntegerField(default=0)
@@ -57,7 +57,7 @@ class Medicine(models.Model):
         default=10,
         help_text="Threshold to trigger low stock alerts (in units)."
     )
-    expired_date = models.DateField(null=True, blank=True)
+    expired_date = models.DateField(null=True, blank=True,db_index=True)
     company_name = models.CharField(max_length=255, blank=True, null=True)
     FSNO = models.CharField(blank=True, null=True)
     department = models.ForeignKey(Department,on_delete=models.SET_NULL,null=True, blank=True,related_name='medicines')
@@ -109,7 +109,7 @@ PAYMENT_METHOD_CHOICES = [
 
 class Sale(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    voucher_number = models.CharField(max_length=20, unique=True, editable=False)
+    voucher_number = models.CharField(max_length=20, unique=True, editable=False,db_index=True)
     sold_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     customer_name = models.CharField(max_length=255, blank=True, null=True)
     customer_phone = models.CharField(max_length=20, blank=True, null=True)
