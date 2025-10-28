@@ -65,26 +65,70 @@ class MedicineViewSet(viewsets.ModelViewSet):
     ordering_fields = ["expire_date", "price", "stock"]
 
     # ------------------- ALERT (Expired + Low Stock) -------------------
+   # ---------------- Export Excel ----------------
+    @action(detail=False, methods=["get"], url_path="export-excel")
+    def export_excel(self, request):
+        queryset = self.get_queryset()
+        df = pd.DataFrame(list(queryset.values()))
+
+        if df.empty:
+            return Response({"detail": "No medicine records found."}, status=404)
+
+        # Handle timezone-aware columns
+        for col in df.select_dtypes(include=["datetime64[ns, UTC]"]).columns:
+            df[col] = df[col].dt.tz_localize(None)
+
+        buffer = BytesIO()
+        df.to_excel(buffer, index=False, engine="openpyxl")
+        buffer.seek(0)
+
+        response = HttpResponse(
+            buffer,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = 'attachment; filename="medicines.xlsx"'
+        return response
+
+    # ---------------- Combined Alerts (Expired + Low Stock) ----------------
     @method_decorator(cache_page(60 * 5))  # Cache for 5 minutes
     @action(detail=False, methods=["get"], url_path="alerts")
     def alerts(self, request):
         """
-        Combined alert endpoint: Returns all medicines that are expired OR low stock.
-        Cached for 5 minutes to reduce DB hits.
+        Returns medicines that are either expired OR have stock below low_stock_threshold.
+        Cached for 5 minutes using Redis to reduce DB hits.
         """
         today = date.today()
+
+        # Filter for expired or low stock
         queryset = Medicine.objects.filter(
-            Q(expire_date__lte=today) | Q(stock_in_unit__lte=F("low_stock_threshold"))
-        ).only("id", "brand_name", "item_name", "stock_in_unit", "expire_date", "low_stock_threshold")
+            Q(expire_date__lte=today) |
+            Q(stock_in_unit__lte=F("low_stock_threshold")) |
+            Q(stock_carton__lte=F("low_stock_threshold"))
+        ).only(
+            "id",
+            "brand_name",
+            "item_name",
+            "batch_no",
+            "stock_in_unit",
+            "stock_carton",
+            "units_per_carton",
+            "low_stock_threshold",
+            "expire_date",
+            "price",
+            "buying_price",
+        )
 
         serializer = self.get_serializer(queryset, many=True)
 
         expired_count = queryset.filter(expire_date__lte=today).count()
-        low_stock_count = queryset.filter(stock__lte=F("low_stock_threshold")).count()
+        low_stock_count = queryset.filter(
+            Q(stock_in_unit__lte=F("low_stock_threshold")) |
+            Q(stock_carton__lte=F("low_stock_threshold"))
+        ).count()
 
         return Response(
             {
-                "alert": True if queryset.exists() else False,
+                "alert": queryset.exists(),
                 "expired_count": expired_count,
                 "low_stock_count": low_stock_count,
                 "total_alerts": queryset.count(),
@@ -94,6 +138,35 @@ class MedicineViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    # ---------------- Simple Analytics Summary ----------------
+    @action(detail=False, methods=["get"], url_path="analytics")
+    def analytics(self, request):
+        today = date.today()
+        total_medicines = Medicine.objects.count()
+        expired_count = Medicine.objects.filter(expire_date__lte=today).count()
+        low_stock_count = Medicine.objects.filter(
+            Q(stock_in_unit__lte=F("low_stock_threshold")) |
+            Q(stock_carton__lte=F("low_stock_threshold"))
+        ).count()
+
+        total_inventory_value = Medicine.objects.aggregate(
+            total=Sum(
+                (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("price"),
+                output_field=FloatField(),
+            )
+        )["total"] or 0
+
+        return Response(
+            {
+                "summary": {
+                    "total_medicines": total_medicines,
+                    "expired_medicines": expired_count,
+                    "low_stock_medicines": low_stock_count,
+                    "total_inventory_value": total_inventory_value,
+                }
+            },
+            status=status.HTTP_200_OK,
+        )
     # ---------------- BULK CREATE ----------------
     def create(self, request, *args, **kwargs):
         if isinstance(request.data, list):
@@ -146,26 +219,26 @@ class MedicineViewSet(viewsets.ModelViewSet):
             updated_ids.append(str(mid))
         return Response({"updated": updated_ids}, status=200)
 
-    # ---------------- CUSTOM STOCK & EXPORT ----------------
-    @action(detail=False, methods=["get"], url_path="export-excel")
-    def export_excel(self, request):
-        queryset = self.get_queryset()
-        df = pd.DataFrame(list(queryset.values()))
-        if df.empty:
-            return Response({"detail": "No medicine records found."}, status=404)
+    # # ---------------- CUSTOM STOCK & EXPORT ----------------
+    # @action(detail=False, methods=["get"], url_path="export-excel")
+    # def export_excel(self, request):
+    #     queryset = self.get_queryset()
+    #     df = pd.DataFrame(list(queryset.values()))
+    #     if df.empty:
+    #         return Response({"detail": "No medicine records found."}, status=404)
 
-        for col in df.select_dtypes(include=["datetime64[ns, UTC]"]).columns:
-            df[col] = df[col].dt.tz_localize(None)
+    #     for col in df.select_dtypes(include=["datetime64[ns, UTC]"]).columns:
+    #         df[col] = df[col].dt.tz_localize(None)
 
-        buffer = BytesIO()
-        df.to_excel(buffer, index=False, engine="openpyxl")
-        buffer.seek(0)
-        response = HttpResponse(
-            buffer,
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        response["Content-Disposition"] = 'attachment; filename="medicines.xlsx"'
-        return response
+    #     buffer = BytesIO()
+    #     df.to_excel(buffer, index=False, engine="openpyxl")
+    #     buffer.seek(0)
+    #     response = HttpResponse(
+    #         buffer,
+    #         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    #     )
+    #     response["Content-Disposition"] = 'attachment; filename="medicines.xlsx"'
+    #     return response
 
 
 # -------------------- SALE --------------------
