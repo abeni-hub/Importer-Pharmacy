@@ -74,8 +74,8 @@ class MedicineViewSet(viewsets.ModelViewSet):
         """
         today = date.today()
         queryset = Medicine.objects.filter(
-            Q(expire_date__lte=today) | Q(stock__lte=F("low_stock_threshold"))
-        ).only("id", "brand_name", "item_name", "stock", "expire_date", "low_stock_threshold")
+            Q(expire_date__lte=today) | Q(stock_in_unit__lte=F("low_stock_threshold"))
+        ).only("id", "brand_name", "item_name", "stock_in_unit", "expire_date", "low_stock_threshold")
 
         serializer = self.get_serializer(queryset, many=True)
 
