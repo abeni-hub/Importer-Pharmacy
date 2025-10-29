@@ -6,7 +6,7 @@ from django.utils import timezone
 from django.core.cache import cache
 from django.views.decorators.cache import cache_page
 from django.utils.decorators import method_decorator
-from django.db.models import Q, F, Sum, Count, Avg, FloatField
+from django.db.models import Q, F, Sum, Count, Avg, FloatField , ExpressionWrapper, DecimalField
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.http import HttpResponse
@@ -321,158 +321,121 @@ class SaleViewSet(viewsets.ModelViewSet):
 
 
 # -------------------- DASHBOARD --------------------
+@method_decorator(cache_page(60 * 5), name='dispatch')  # Cache for 5 minutes
 class DashboardViewSet(viewsets.ViewSet):
     """
-    Dashboard API with overview, analytics, and profit summary.
-    Cached for performance using Redis (5 min).
+    Dashboard API for summary metrics
     """
 
-    # ---------------- OVERVIEW ----------------
-    @method_decorator(cache_page(60 * 5))
-    @action(detail=False, methods=["get"], url_path="overview")
+    @action(detail=False, methods=["get"])
     def overview(self, request):
         today = now().date()
         near_expiry_threshold = today + timedelta(days=30)
 
+        # Stock and expiry metrics
         total_medicines = Medicine.objects.count()
+        low_stock = Medicine.objects.filter(stock_in_unit__lte=10, stock_in_unit__gt=0).count()
+        stock_out = Medicine.objects.filter(stock_in_unit=0).count()
         expired = Medicine.objects.filter(expire_date__lt=today).count()
         near_expiry = Medicine.objects.filter(
             expire_date__gte=today, expire_date__lte=near_expiry_threshold
         ).count()
-        low_stock = Medicine.objects.filter(
-            Q(stock_in_unit__lte=F("low_stock_threshold")) |
-            Q(stock_carton__lte=F("low_stock_threshold"))
-        ).count()
-        stock_out = Medicine.objects.filter(
-            stock_in_unit=0, stock_carton=0
-        ).count()
 
+        # Sales metrics
         today_sales_qty = (
             SaleItem.objects.filter(sale__sale_date__date=today)
             .aggregate(total=Sum("quantity"))
-            .get("total", 0) or 0
+            .get("total")
+            or 0
         )
+
         total_sales_qty = (
-            SaleItem.objects.aggregate(total=Sum("quantity")).get("total", 0) or 0
+            SaleItem.objects.aggregate(total=Sum("quantity")).get("total") or 0
         )
+
         revenue_today = (
             Sale.objects.filter(sale_date__date=today)
             .aggregate(revenue=Sum("total_amount"))
-            .get("revenue", 0) or 0
+            .get("revenue")
+            or Decimal("0.00")
         )
+
         total_revenue = (
-            Sale.objects.aggregate(revenue=Sum("total_amount")).get("revenue", 0) or 0
+            Sale.objects.aggregate(revenue=Sum("total_amount")).get("revenue")
+            or Decimal("0.00")
         )
 
         return Response(
             {
                 "stock": {
                     "total_medicines": total_medicines,
-                    "expired": expired,
-                    "near_expiry": near_expiry,
                     "low_stock": low_stock,
                     "stock_out": stock_out,
+                    "expired": expired,
+                    "near_expiry": near_expiry,
                 },
                 "sales": {
                     "today_sales_qty": today_sales_qty,
                     "total_sales_qty": total_sales_qty,
-                    "revenue_today": revenue_today,
-                    "total_revenue": total_revenue,
+                    "revenue_today": float(revenue_today),
+                    "total_revenue": float(total_revenue),
                 },
-            },
-            status=200,
+            }
         )
 
-    # ---------------- ANALYTICS ----------------
-    @method_decorator(cache_page(60 * 10))
-    @action(detail=False, methods=["get"], url_path="analytics")
+    # ----------------- ANALYTICS SECTION -----------------
+    @action(detail=False, methods=["get"])
     def analytics(self, request):
-        """
-        Inventory and sales analytics summary.
-        """
         today = now().date()
 
-        # Inventory value
-        total_inventory_value = Medicine.objects.aggregate(
-            total=Sum(
-                (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("price"),
-                output_field=FloatField(),
-            )
-        )["total"] or 0
-
-        # Buying value (for profit computation)
-        total_buying_value = Medicine.objects.aggregate(
-            total=Sum(
-                (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("buying_price"),
-                output_field=FloatField(),
-            )
-        )["total"] or 0
-
-        # Total sales revenue
-        total_revenue = (
-            Sale.objects.aggregate(total=Sum("total_amount")).get("total") or 0
+        # Revenue & Profit Calculation using Decimal-safe expressions
+        sale_items = SaleItem.objects.annotate(
+            total_sale=F("quantity") * F("price"),
+            total_cost=F("quantity") * F("medicine__buying_price"),
         )
 
-        # Total profit
+        total_revenue = sale_items.aggregate(total=Sum("total_sale"))["total"] or Decimal("0.00")
+        total_buying_value = sale_items.aggregate(total=Sum("total_cost"))["total"] or Decimal("0.00")
         total_profit = total_revenue - total_buying_value
 
-        return Response(
-            {
-                "inventory": {
-                    "total_inventory_value": total_inventory_value,
-                    "total_buying_value": total_buying_value,
-                    "total_profit": total_profit,
-                },
-                "sales": {
-                    "total_revenue": total_revenue,
-                    "total_medicines": Medicine.objects.count(),
-                    "expired_medicines": Medicine.objects.filter(expire_date__lte=today).count(),
-                    "low_stock_medicines": Medicine.objects.filter(
-                        Q(stock_in_unit__lte=F("low_stock_threshold")) |
-                        Q(stock_carton__lte=F("low_stock_threshold"))
-                    ).count(),
-                },
-            },
-            status=200,
-        )
+        # Today's metrics
+        today_items = sale_items.filter(sale__sale_date__date=today)
+        today_revenue = today_items.aggregate(total=Sum("total_sale"))["total"] or Decimal("0.00")
+        today_buying_value = today_items.aggregate(total=Sum("total_cost"))["total"] or Decimal("0.00")
+        today_profit = today_revenue - today_buying_value
 
-    # ---------------- PROFIT SUMMARY ----------------
-    @method_decorator(cache_page(60 * 15))
-    @action(detail=False, methods=["get"], url_path="profit-summary")
+        return Response({
+            "total_revenue": float(total_revenue),
+            "total_buying_value": float(total_buying_value),
+            "total_profit": float(total_profit),
+            "today_revenue": float(today_revenue),
+            "today_buying_value": float(today_buying_value),
+            "today_profit": float(today_profit),
+        })
+
+    # ----------------- PROFIT SUMMARY SECTION -----------------
+    @action(detail=False, methods=["get"])
     def profit_summary(self, request):
-        """
-        Returns daily, weekly, and monthly profit summary.
-        """
         today = now().date()
-        start_of_week = today - timedelta(days=today.weekday())
         start_of_month = today.replace(day=1)
 
-        def get_profit_summary(start_date, end_date):
-            sales = Sale.objects.filter(sale_date__date__gte=start_date, sale_date__date__lte=end_date)
-            total_revenue = sales.aggregate(total=Sum("total_amount")).get("total") or 0
-
-            sold_items = SaleItem.objects.filter(sale__in=sales)
-            total_cost = (
-                sold_items.aggregate(
-                    total=Sum(F("quantity") * F("medicine__buying_price"), output_field=FloatField())
-                ).get("total")
-                or 0
-            )
-            profit = total_revenue - total_cost
-            return {"revenue": total_revenue, "cost": total_cost, "profit": profit}
-
-        daily = get_profit_summary(today, today)
-        weekly = get_profit_summary(start_of_week, today)
-        monthly = get_profit_summary(start_of_month, today)
-
-        return Response(
-            {
-                "daily": daily,
-                "weekly": weekly,
-                "monthly": monthly,
-            },
-            status=200,
+        # Monthly sales items
+        month_items = SaleItem.objects.filter(sale__sale_date__date__gte=start_of_month)
+        month_items = month_items.annotate(
+            total_sale=ExpressionWrapper(F("quantity") * F("price"), output_field=DecimalField()),
+            total_cost=ExpressionWrapper(F("quantity") * F("medicine__buying_price"), output_field=DecimalField()),
         )
+
+        total_sale_month = month_items.aggregate(total=Sum("total_sale"))["total"] or Decimal("0.00")
+        total_cost_month = month_items.aggregate(total=Sum("total_cost"))["total"] or Decimal("0.00")
+        total_profit_month = total_sale_month - total_cost_month
+
+        return Response({
+            "month_revenue": float(total_sale_month),
+            "month_cost": float(total_cost_month),
+            "month_profit": float(total_profit_month),
+        })
+
 # -------------------- SETTINGS --------------------
 class SettingViewSet(viewsets.ModelViewSet):
     queryset = Setting.objects.all()
