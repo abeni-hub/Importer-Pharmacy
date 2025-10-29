@@ -323,51 +323,55 @@ class SaleViewSet(viewsets.ModelViewSet):
 # -------------------- DASHBOARD --------------------
 class DashboardViewSet(viewsets.ViewSet):
     """
-    Dashboard API for summary metrics
+    Dashboard API with overview, analytics, and profit summary.
+    Cached for performance using Redis (5 min).
     """
 
-    @action(detail=False, methods=["get"])
+    # ---------------- OVERVIEW ----------------
+    @method_decorator(cache_page(60 * 5))
+    @action(detail=False, methods=["get"], url_path="overview")
     def overview(self, request):
         today = now().date()
         near_expiry_threshold = today + timedelta(days=30)
 
         total_medicines = Medicine.objects.count()
-        medicines = Medicine.objects.all()
-
-        low_stock = Medicine.objects.filter(stock__lte=10, stock__gt=0).count()
-        stock_out = Medicine.objects.filter(stock=0).count()
         expired = Medicine.objects.filter(expire_date__lt=today).count()
         near_expiry = Medicine.objects.filter(
             expire_date__gte=today, expire_date__lte=near_expiry_threshold
+        ).count()
+        low_stock = Medicine.objects.filter(
+            Q(stock_in_unit__lte=F("low_stock_threshold")) |
+            Q(stock_carton__lte=F("low_stock_threshold"))
+        ).count()
+        stock_out = Medicine.objects.filter(
+            stock_in_unit=0, stock_carton=0
         ).count()
 
         today_sales_qty = (
             SaleItem.objects.filter(sale__sale_date__date=today)
             .aggregate(total=Sum("quantity"))
-            .get("total")
-            or 0
+            .get("total", 0) or 0
         )
         total_sales_qty = (
-            SaleItem.objects.aggregate(total=Sum("quantity")).get("total") or 0
+            SaleItem.objects.aggregate(total=Sum("quantity")).get("total", 0) or 0
         )
         revenue_today = (
             Sale.objects.filter(sale_date__date=today)
             .aggregate(revenue=Sum("total_amount"))
-            .get("revenue")
-            or 0
+            .get("revenue", 0) or 0
         )
         total_revenue = (
-            Sale.objects.aggregate(revenue=Sum("total_amount")).get("revenue") or 0
+            Sale.objects.aggregate(revenue=Sum("total_amount")).get("revenue", 0) or 0
         )
 
         return Response(
             {
                 "stock": {
                     "total_medicines": total_medicines,
-                    "low_stock": low_stock,
-                    "stock_out": stock_out,
                     "expired": expired,
                     "near_expiry": near_expiry,
+                    "low_stock": low_stock,
+                    "stock_out": stock_out,
                 },
                 "sales": {
                     "today_sales_qty": today_sales_qty,
@@ -375,10 +379,100 @@ class DashboardViewSet(viewsets.ViewSet):
                     "revenue_today": revenue_today,
                     "total_revenue": total_revenue,
                 },
-            }
+            },
+            status=200,
         )
 
+    # ---------------- ANALYTICS ----------------
+    @method_decorator(cache_page(60 * 10))
+    @action(detail=False, methods=["get"], url_path="analytics")
+    def analytics(self, request):
+        """
+        Inventory and sales analytics summary.
+        """
+        today = now().date()
 
+        # Inventory value
+        total_inventory_value = Medicine.objects.aggregate(
+            total=Sum(
+                (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("price"),
+                output_field=FloatField(),
+            )
+        )["total"] or 0
+
+        # Buying value (for profit computation)
+        total_buying_value = Medicine.objects.aggregate(
+            total=Sum(
+                (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("buying_price"),
+                output_field=FloatField(),
+            )
+        )["total"] or 0
+
+        # Total sales revenue
+        total_revenue = (
+            Sale.objects.aggregate(total=Sum("total_amount")).get("total") or 0
+        )
+
+        # Total profit
+        total_profit = total_revenue - total_buying_value
+
+        return Response(
+            {
+                "inventory": {
+                    "total_inventory_value": total_inventory_value,
+                    "total_buying_value": total_buying_value,
+                    "total_profit": total_profit,
+                },
+                "sales": {
+                    "total_revenue": total_revenue,
+                    "total_medicines": Medicine.objects.count(),
+                    "expired_medicines": Medicine.objects.filter(expire_date__lte=today).count(),
+                    "low_stock_medicines": Medicine.objects.filter(
+                        Q(stock_in_unit__lte=F("low_stock_threshold")) |
+                        Q(stock_carton__lte=F("low_stock_threshold"))
+                    ).count(),
+                },
+            },
+            status=200,
+        )
+
+    # ---------------- PROFIT SUMMARY ----------------
+    @method_decorator(cache_page(60 * 15))
+    @action(detail=False, methods=["get"], url_path="profit-summary")
+    def profit_summary(self, request):
+        """
+        Returns daily, weekly, and monthly profit summary.
+        """
+        today = now().date()
+        start_of_week = today - timedelta(days=today.weekday())
+        start_of_month = today.replace(day=1)
+
+        def get_profit_summary(start_date, end_date):
+            sales = Sale.objects.filter(sale_date__date__gte=start_date, sale_date__date__lte=end_date)
+            total_revenue = sales.aggregate(total=Sum("total_amount")).get("total") or 0
+
+            sold_items = SaleItem.objects.filter(sale__in=sales)
+            total_cost = (
+                sold_items.aggregate(
+                    total=Sum(F("quantity") * F("medicine__buying_price"), output_field=FloatField())
+                ).get("total")
+                or 0
+            )
+            profit = total_revenue - total_cost
+            return {"revenue": total_revenue, "cost": total_cost, "profit": profit}
+
+        daily = get_profit_summary(today, today)
+        weekly = get_profit_summary(start_of_week, today)
+        monthly = get_profit_summary(start_of_month, today)
+
+        return Response(
+            {
+                "daily": daily,
+                "weekly": weekly,
+                "monthly": monthly,
+            },
+            status=200,
+        )
 # -------------------- SETTINGS --------------------
 class SettingViewSet(viewsets.ModelViewSet):
     queryset = Setting.objects.all()
