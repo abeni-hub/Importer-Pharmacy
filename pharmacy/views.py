@@ -17,6 +17,7 @@ from openpyxl import Workbook
 import pandas as pd
 from django.db.models import Value
 from django.db.models.functions import Coalesce
+from django.db.models import IntegerField
 
 from .models import Medicine, Sale, Department, SaleItem, Setting
 from .serializers import (
@@ -324,21 +325,27 @@ class SaleViewSet(viewsets.ModelViewSet):
 
 # -------------------- DASHBOARD --------------------
 # ----------------- OVERVIEW SECTION -----------------
+class DashboardViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["get"])
     def overview(self, request):
         today = now().date()
         near_expiry_threshold = today + timedelta(days=30)
 
-        # ========== STOCK SECTION ==========
+        # ---------- STOCK SECTION ----------
         total_medicines = Medicine.objects.count()
 
+        total_stock_expr = ExpressionWrapper(
+            F("stock_in_unit") + F("stock_carton") * F("units_per_carton"),
+            output_field=IntegerField()
+        )
+
         low_stock = Medicine.objects.filter(
-            (F("stock_in_unit") + F("stock_carton") * F("units_per_carton")) <= F("low_stock_threshold"),
-            (F("stock_in_unit") + F("stock_carton") * F("units_per_carton")) > 0
+            total_stock_expr__lte=F("low_stock_threshold"),
+            total_stock_expr__gt=0
         ).count()
 
         stock_out = Medicine.objects.filter(
-            (F("stock_in_unit") + F("stock_carton") * F("units_per_carton")) <= 0
+            total_stock_expr__lte=0
         ).count()
 
         expired = Medicine.objects.filter(expire_date__lt=today).count()
@@ -346,13 +353,15 @@ class SaleViewSet(viewsets.ModelViewSet):
             expire_date__gte=today, expire_date__lte=near_expiry_threshold
         ).count()
 
-        # ========== SALES SECTION ==========
+        # ---------- SALES SECTION ----------
         today_sales_qty = (
             SaleItem.objects.filter(sale__sale_date__date=today)
             .aggregate(total=Sum("quantity"))
             .get("total") or 0
         )
-        total_sales_qty = SaleItem.objects.aggregate(total=Sum("quantity")).get("total") or 0
+        total_sales_qty = (
+            SaleItem.objects.aggregate(total=Sum("quantity")).get("total") or 0
+        )
 
         revenue_today = (
             Sale.objects.filter(sale_date__date=today)
@@ -364,7 +373,7 @@ class SaleViewSet(viewsets.ModelViewSet):
             .get("revenue")
         )
 
-        # ========== PROFIT SECTION ==========
+        # ---------- PROFIT SECTION ----------
         today_profit = SaleItem.objects.filter(sale__sale_date__date=today).aggregate(
             profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
         )["profit"]
@@ -373,19 +382,21 @@ class SaleViewSet(viewsets.ModelViewSet):
             profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
         )["profit"]
 
-        # ========== TOP SELLING MEDICINES ==========
+        # ---------- TOP SELLING ----------
         top_selling = (
             SaleItem.objects.values("medicine__brand_name")
             .annotate(total_sold=Sum("quantity"))
             .order_by("-total_sold")[:5]
         )
 
-        # ========== DEPARTMENTS (CATEGORY) STATS ==========
+        # ---------- DEPARTMENTS ----------
         departments = (
             Medicine.objects.values("department__name")
             .annotate(
-                total=Coalesce(Sum(F("stock_in_unit") + F("stock_carton") * F("units_per_carton")), Value(0)),
-                total_profit=Coalesce(Sum((F("price") - F("buying_price")) * (F("stock_in_unit") + F("stock_carton") * F("units_per_carton"))), Value(0))
+                total=Coalesce(Sum(total_stock_expr), Value(0)),
+                total_profit=Coalesce(Sum(
+                    (F("price") - F("buying_price")) * total_stock_expr
+                ), Value(0))
             )
             .order_by("-total")
         )
@@ -412,7 +423,7 @@ class SaleViewSet(viewsets.ModelViewSet):
             "departments": list(departments),
         })
 
-    # ----------------- PROFIT SUMMARY SECTION -----------------
+    # ---------- PROFIT SUMMARY ----------
     @action(detail=False, methods=["get"])
     def profit_summary(self, request):
         today = now().date()
@@ -436,7 +447,6 @@ class SaleViewSet(viewsets.ModelViewSet):
             "weekly_profit": float(weekly_profit),
             "monthly_profit": float(monthly_profit),
         })
-
     # ----------------- ANALYTICS SECTION -----------------
     @action(detail=False, methods=["get"])
     def analytics(self, request):
