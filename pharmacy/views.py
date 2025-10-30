@@ -339,89 +339,88 @@ class SaleViewSet(viewsets.ModelViewSet):
 
 # -------------------- DASHBOARD --------------------
 # ----------------- OVERVIEW SECTION -----------------
+@method_decorator(cache_page(60 * 5), name="overview")  # Cache for 5 minutes
 class DashboardViewSet(viewsets.ViewSet):
+    """
+    Dashboard API for overview, analytics, and profit summary
+    """
 
-    # ---------------- OVERVIEW SECTION ----------------
+    # ----------------- OVERVIEW SECTION -----------------
     @action(detail=False, methods=["get"])
-    @cache_page(60 * 5)
     def overview(self, request):
         today = now().date()
         near_expiry_threshold = today + timedelta(days=30)
 
-        # ---------- STOCK SECTION ----------
-        total_medicines = Medicine.objects.count()
-
-        # Inline expression (avoid alias issue)
-        low_stock = Medicine.objects.annotate(
-            total_stock=F("stock_in_unit") + F("stock_carton") * F("units_per_carton")
-        ).filter(total_stock__lte=F("low_stock_threshold"), total_stock__gt=0).count()
-
-        stock_out = Medicine.objects.annotate(
-            total_stock=F("stock_in_unit") + F("stock_carton") * F("units_per_carton")
-        ).filter(total_stock__lte=0).count()
-
-        expired = Medicine.objects.filter(expire_date__lt=today).count()
-        near_expiry = Medicine.objects.filter(
-            expire_date__gte=today, expire_date__lte=near_expiry_threshold
-        ).count()
-
-        # ---------- SALES SECTION ----------
-        today_sales_qty = (
-            SaleItem.objects.filter(sale__sale_date__date=today)
-            .aggregate(total=Sum("quantity"))
-            .get("total") or 0
+        # ✅ Calculate total stock per medicine
+        total_stock_expr = ExpressionWrapper(
+            F("stock_in_unit") + (F("stock_carton") * F("units_per_carton")),
+            output_field=IntegerField()
         )
-        total_sales_qty = (
-            SaleItem.objects.aggregate(total=Sum("quantity")).get("total") or 0
-        )
+
+        medicines = Medicine.objects.annotate(total_stock=total_stock_expr)
+
+        # ✅ Counts
+        total_medicines = medicines.count()
+        low_stock = medicines.filter(total_stock__gt=0, total_stock__lte=F("low_stock_threshold")).count()
+        stock_out = medicines.filter(total_stock__lte=0).count()
+        expired = medicines.filter(expire_date__lt=today).count()
+        near_expiry = medicines.filter(expire_date__gte=today, expire_date__lte=near_expiry_threshold).count()
+
+        # ✅ Sales summary
+        today_sales_items = SaleItem.objects.filter(sale__sale_date__date=today)
+        all_sales_items = SaleItem.objects.all()
+
+        today_sales_qty = today_sales_items.aggregate(total=Sum("quantity"))["total"] or 0
+        total_sales_qty = all_sales_items.aggregate(total=Sum("quantity"))["total"] or 0
 
         revenue_today = (
             Sale.objects.filter(sale_date__date=today)
-            .aggregate(revenue=Coalesce(Sum("total_amount"), Value(0)))
-            .get("revenue")
+            .aggregate(revenue=Sum("total_amount"))
+            .get("revenue") or Decimal("0.00")
         )
         total_revenue = (
-            Sale.objects.aggregate(revenue=Coalesce(Sum("total_amount"), Value(0)))
-            .get("revenue")
+            Sale.objects.aggregate(revenue=Sum("total_amount"))
+            .get("revenue") or Decimal("0.00")
         )
 
-        # ---------- PROFIT SECTION ----------
-        today_profit = SaleItem.objects.filter(sale__sale_date__date=today).aggregate(
-            profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
-        )["profit"]
+        # ✅ Profit summary
+        today_profit_expr = ExpressionWrapper(
+            (F("medicine__price") - F("medicine__buying_price")) * F("quantity"),
+            output_field=DecimalField(max_digits=10, decimal_places=2)
+        )
+        total_profit_expr = ExpressionWrapper(
+            (F("medicine__price") - F("medicine__buying_price")) * F("quantity"),
+            output_field=DecimalField(max_digits=10, decimal_places=2)
+        )
 
-        total_profit = SaleItem.objects.aggregate(
-            profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
-        )["profit"]
+        today_profit = (
+            today_sales_items.annotate(profit=today_profit_expr)
+            .aggregate(total=Sum("profit"))
+            .get("total") or Decimal("0.00")
+        )
+        total_profit = (
+            all_sales_items.annotate(profit=total_profit_expr)
+            .aggregate(total=Sum("profit"))
+            .get("total") or Decimal("0.00")
+        )
 
-        # ---------- TOP SELLING ----------
+        # ✅ Top selling
         top_selling = (
-            SaleItem.objects.values("medicine__brand_name")
+            all_sales_items.values("medicine__brand_name")
             .annotate(total_sold=Sum("quantity"))
             .order_by("-total_sold")[:5]
         )
 
-        # ---------- DEPARTMENTS ----------
+        # ✅ Departments summary
         departments = (
-            Medicine.objects.values("department__name")
+            medicines.values("department__name")
             .annotate(
-                total=Coalesce(
-                    Sum(
-                        F("stock_in_unit") + F("stock_carton") * F("units_per_carton")
-                    ),
-                    Value(0),
-                ),
-                total_profit=Coalesce(
-                    Sum(
-                        (F("price") - F("buying_price"))
-                        * (F("stock_in_unit") + F("stock_carton") * F("units_per_carton"))
-                    ),
-                    Value(0),
-                ),
+                total=Sum("total_stock"),
+                total_profit=Sum((F("price") - F("buying_price")) * F("total_stock")),
             )
-            .order_by("-total")
         )
 
+        # ✅ Final Response (fits your TypeScript interface)
         return Response({
             "stock": {
                 "total_medicines": total_medicines,
@@ -443,7 +442,6 @@ class DashboardViewSet(viewsets.ViewSet):
             "top_selling": list(top_selling),
             "departments": list(departments),
         })
-
     # ---------------- PROFIT SUMMARY ----------------
     @action(detail=False, methods=["get"])
     @cache_page(60 * 5)
