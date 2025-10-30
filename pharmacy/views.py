@@ -18,6 +18,20 @@ import pandas as pd
 from django.db.models import Value
 from django.db.models.functions import Coalesce
 from django.db.models import IntegerField
+from datetime import timedelta
+from decimal import Decimal
+from django.db.models import (
+    Sum, F, Value, IntegerField, DecimalField, ExpressionWrapper, Q
+)
+from django.db.models.functions import Coalesce, TruncDate
+from django.utils.timezone import now
+from django.views.decorators.cache import cache_page
+from rest_framework import viewsets
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from pharmacy.models import Medicine, Sale, SaleItem, Department, Setting
 
 from .models import Medicine, Sale, Department, SaleItem, Setting
 from .serializers import (
@@ -326,7 +340,10 @@ class SaleViewSet(viewsets.ModelViewSet):
 # -------------------- DASHBOARD --------------------
 # ----------------- OVERVIEW SECTION -----------------
 class DashboardViewSet(viewsets.ViewSet):
+
+    # ---------------- OVERVIEW SECTION ----------------
     @action(detail=False, methods=["get"])
+    @cache_page(60 * 5)
     def overview(self, request):
         today = now().date()
         near_expiry_threshold = today + timedelta(days=30)
@@ -334,19 +351,14 @@ class DashboardViewSet(viewsets.ViewSet):
         # ---------- STOCK SECTION ----------
         total_medicines = Medicine.objects.count()
 
-        total_stock_expr = ExpressionWrapper(
-            F("stock_in_unit") + F("stock_carton") * F("units_per_carton"),
-            output_field=IntegerField()
-        )
+        # Inline expression (avoid alias issue)
+        low_stock = Medicine.objects.annotate(
+            total_stock=F("stock_in_unit") + F("stock_carton") * F("units_per_carton")
+        ).filter(total_stock__lte=F("low_stock_threshold"), total_stock__gt=0).count()
 
-        low_stock = Medicine.objects.filter(
-            total_stock_expr__lte=F("low_stock_threshold"),
-            total_stock_expr__gt=0
-        ).count()
-
-        stock_out = Medicine.objects.filter(
-            total_stock_expr__lte=0
-        ).count()
+        stock_out = Medicine.objects.annotate(
+            total_stock=F("stock_in_unit") + F("stock_carton") * F("units_per_carton")
+        ).filter(total_stock__lte=0).count()
 
         expired = Medicine.objects.filter(expire_date__lt=today).count()
         near_expiry = Medicine.objects.filter(
@@ -393,10 +405,19 @@ class DashboardViewSet(viewsets.ViewSet):
         departments = (
             Medicine.objects.values("department__name")
             .annotate(
-                total=Coalesce(Sum(total_stock_expr), Value(0)),
-                total_profit=Coalesce(Sum(
-                    (F("price") - F("buying_price")) * total_stock_expr
-                ), Value(0))
+                total=Coalesce(
+                    Sum(
+                        F("stock_in_unit") + F("stock_carton") * F("units_per_carton")
+                    ),
+                    Value(0),
+                ),
+                total_profit=Coalesce(
+                    Sum(
+                        (F("price") - F("buying_price"))
+                        * (F("stock_in_unit") + F("stock_carton") * F("units_per_carton"))
+                    ),
+                    Value(0),
+                ),
             )
             .order_by("-total")
         )
@@ -423,8 +444,9 @@ class DashboardViewSet(viewsets.ViewSet):
             "departments": list(departments),
         })
 
-    # ---------- PROFIT SUMMARY ----------
+    # ---------------- PROFIT SUMMARY ----------------
     @action(detail=False, methods=["get"])
+    @cache_page(60 * 5)
     def profit_summary(self, request):
         today = now().date()
         week_start = today - timedelta(days=7)
@@ -447,8 +469,10 @@ class DashboardViewSet(viewsets.ViewSet):
             "weekly_profit": float(weekly_profit),
             "monthly_profit": float(monthly_profit),
         })
-    # ----------------- ANALYTICS SECTION -----------------
+
+    # ---------------- ANALYTICS SECTION ----------------
     @action(detail=False, methods=["get"])
+    @cache_page(60 * 5)
     def analytics(self, request):
         """
         Returns JSON shaped exactly like the provided AnalyticsData interface.
@@ -456,19 +480,18 @@ class DashboardViewSet(viewsets.ViewSet):
         """
 
         today = now().date()
-        last_week = today - timedelta(days=6)  # include today + 6 previous = 7 days window
+        last_week = today - timedelta(days=6)
         near_expiry_threshold = today + timedelta(days=30)
 
-        # ---------- Summary ----------
+        # ---------- SUMMARY ----------
         total_revenue = Sale.objects.aggregate(total=Sum("total_amount"))["total"] or Decimal("0.00")
         total_transactions = Sale.objects.count()
         avg_order_value = (total_revenue / total_transactions) if total_transactions > 0 else Decimal("0.00")
 
-        # inventory_value: sum of (cartons*units_per_carton + units) * price
         inventory_value_agg = Medicine.objects.aggregate(
             inventory_value=Sum(
                 (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("price"),
-                output_field=DecimalField(max_digits=30, decimal_places=2)
+                output_field=DecimalField(max_digits=30, decimal_places=2),
             )
         )["inventory_value"] or Decimal("0.00")
 
@@ -479,7 +502,7 @@ class DashboardViewSet(viewsets.ViewSet):
             "inventory_value": float(inventory_value_agg),
         }
 
-        # ---------- Sales Trend (last 7 days) ----------
+        # ---------- SALES TREND ----------
         sales_trend_qs = (
             Sale.objects.filter(sale_date__date__gte=last_week)
             .annotate(day=TruncDate("sale_date"))
@@ -488,27 +511,22 @@ class DashboardViewSet(viewsets.ViewSet):
             .order_by("day")
         )
         sales_trend = [
-            {
-                "day": entry["day"].strftime("%Y-%m-%d"),
-                "total_sales": float(entry["total_sales"] or 0)
-            }
+            {"day": entry["day"].strftime("%Y-%m-%d"), "total_sales": float(entry["total_sales"] or 0)}
             for entry in sales_trend_qs
         ]
 
-        # If there are days with zero sales and you need all 7 days present, front-end can fill gaps.
-        # (Keeping raw DB output here, matches interface expectations.)
-
-        # ---------- Inventory by Category ----------
+        # ---------- INVENTORY BY CATEGORY ----------
         inv_by_cat_qs = (
             Medicine.objects.values("department__name")
             .annotate(
                 value=Sum(
                     (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("price"),
-                    output_field=DecimalField(max_digits=30, decimal_places=2)
+                    output_field=DecimalField(max_digits=30, decimal_places=2),
                 ),
                 profit=Sum(
-                    (F("price") - F("buying_price")) * (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")),
-                    output_field=DecimalField(max_digits=30, decimal_places=2)
+                    (F("price") - F("buying_price"))
+                    * (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")),
+                    output_field=DecimalField(max_digits=30, decimal_places=2),
                 ),
             )
             .order_by("-value")
@@ -522,43 +540,35 @@ class DashboardViewSet(viewsets.ViewSet):
             for row in inv_by_cat_qs
         ]
 
-        # ---------- Top Selling ----------
+        # ---------- TOP SELLING ----------
         top_selling_qs = (
             SaleItem.objects.values("medicine__brand_name")
             .annotate(total_sold=Sum("quantity"))
             .order_by("-total_sold")[:5]
         )
         top_selling = [
-            {
-                "medicine__brand_name": row["medicine__brand_name"] or "Unknown",
-                "total_sold": int(row["total_sold"] or 0)
-            }
+            {"medicine__brand_name": row["medicine__brand_name"] or "Unknown", "total_sold": int(row["total_sold"] or 0)}
             for row in top_selling_qs
         ]
 
-        # ---------- Stock Alerts ----------
-        # low_stock: medicines where total_units <= low_stock_threshold and > 0
+        # ---------- STOCK ALERTS ----------
         low_stock_qs = Medicine.objects.annotate(
             total_units=(F("stock_carton") * F("units_per_carton") + F("stock_in_unit"))
-        ).filter(total_units__lte=F("low_stock_threshold"), total_units__gt=0).values(
-            "id", "brand_name", "item_name", "batch_no", "stock_carton", "units_per_carton", "stock_in_unit", "low_stock_threshold"
-        )
+        ).filter(total_units__lte=F("low_stock_threshold"), total_units__gt=0)
 
         stock_out_qs = Medicine.objects.annotate(
             total_units=(F("stock_carton") * F("units_per_carton") + F("stock_in_unit"))
-        ).filter(total_units__lte=0).values(
-            "id", "brand_name", "item_name", "batch_no", "stock_carton", "units_per_carton", "stock_in_unit"
-        )
+        ).filter(total_units__lte=0)
 
         near_expiry_qs = Medicine.objects.filter(
             expire_date__gte=today, expire_date__lte=near_expiry_threshold
-        ).values("id", "brand_name", "item_name", "batch_no", "expire_date")
+        )
 
-        low_stock = [dict(item) for item in low_stock_qs]
-        stock_out = [dict(item) for item in stock_out_qs]
+        low_stock = list(low_stock_qs.values("id", "brand_name", "item_name", "batch_no", "stock_in_unit"))
+        stock_out = list(stock_out_qs.values("id", "brand_name", "item_name", "batch_no", "stock_in_unit"))
         near_expiry = [
-            {**dict(item), "expire_date": item["expire_date"].strftime("%Y-%m-%d")}
-            for item in near_expiry_qs
+            {"id": m["id"], "brand_name": m["brand_name"], "item_name": m["item_name"], "batch_no": m["batch_no"], "expire_date": m["expire_date"].strftime("%Y-%m-%d")}
+            for m in near_expiry_qs.values("id", "brand_name", "item_name", "batch_no", "expire_date")
         ]
 
         stock_alerts = {
@@ -567,46 +577,33 @@ class DashboardViewSet(viewsets.ViewSet):
             "near_expiry": near_expiry,
         }
 
-        # ---------- Weekly Summary ----------
-        week_sales = (
-            Sale.objects.filter(sale_date__date__gte=last_week)
-            .aggregate(total=Sum("total_amount"))
-            .get("total") or Decimal("0.00")
-        )
+        # ---------- WEEKLY SUMMARY ----------
+        week_sales = Sale.objects.filter(sale_date__date__gte=last_week).aggregate(total=Sum("total_amount"))["total"] or Decimal("0.00")
         week_transactions = Sale.objects.filter(sale_date__date__gte=last_week).count()
+        weekly_summary = {"week_sales": float(week_sales), "transactions": int(week_transactions)}
 
-        weekly_summary = {
-            "week_sales": float(week_sales),
-            "transactions": int(week_transactions),
-        }
-
-        # ---------- Inventory Health ----------
+        # ---------- INVENTORY HEALTH ----------
         total_products = Medicine.objects.count()
-        low_stock_count = len(low_stock)
-        near_expiry_count = len(near_expiry)
-        stock_out_count = len(stock_out)
-
         inventory_health = {
-            "total_products": int(total_products),
-            "low_stock": int(low_stock_count),
-            "near_expiry": int(near_expiry_count),
-            "stock_out": int(stock_out_count),
+            "total_products": total_products,
+            "low_stock": len(low_stock),
+            "near_expiry": len(near_expiry),
+            "stock_out": len(stock_out),
         }
 
-        # ---------- Performance Metrics ----------
-        # inventory_turnover = total_revenue / inventory_cost (use buying_price as cost base)
+        # ---------- PERFORMANCE METRICS ----------
         inventory_cost = Medicine.objects.aggregate(
-            total_cost=Sum((F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("buying_price"),
-                           output_field=DecimalField(max_digits=30, decimal_places=2))
+            total_cost=Sum(
+                (F("stock_carton") * F("units_per_carton") + F("stock_in_unit")) * F("buying_price"),
+                output_field=DecimalField(max_digits=30, decimal_places=2),
+            )
         )["total_cost"] or Decimal("0.00")
 
-        inventory_turnover = (total_revenue / inventory_cost) if (inventory_cost and inventory_cost > 0) else Decimal("0.00")
+        inventory_turnover = (total_revenue / inventory_cost) if inventory_cost > 0 else Decimal("0.00")
 
-        performance_metrics = {
-            "inventory_turnover": float(inventory_turnover),
-        }
+        performance_metrics = {"inventory_turnover": float(inventory_turnover)}
 
-        # ---------- Final payload matching the TS interface ----------
+        # ---------- FINAL PAYLOAD ----------
         payload = {
             "summary": summary,
             "sales_trend": sales_trend,
