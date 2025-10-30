@@ -15,6 +15,8 @@ from decimal import Decimal
 from io import BytesIO
 from openpyxl import Workbook
 import pandas as pd
+from django.db.models import Value
+from django.db.models.functions import Coalesce
 
 from .models import Medicine, Sale, Department, SaleItem, Setting
 from .serializers import (
@@ -321,20 +323,15 @@ class SaleViewSet(viewsets.ModelViewSet):
 
 
 # -------------------- DASHBOARD --------------------
-class DashboardViewSet(viewsets.ViewSet):
-    """
-    Dashboard API for overview, analytics, and profit summary
-    """
-
-    # ----------------- OVERVIEW SECTION -----------------
+# ----------------- OVERVIEW SECTION -----------------
     @action(detail=False, methods=["get"])
     def overview(self, request):
         today = now().date()
         near_expiry_threshold = today + timedelta(days=30)
 
+        # ========== STOCK SECTION ==========
         total_medicines = Medicine.objects.count()
 
-        # Use stock_in_unit as primary per-unit stock; for cartons, compute units when needed
         low_stock = Medicine.objects.filter(
             (F("stock_in_unit") + F("stock_carton") * F("units_per_carton")) <= F("low_stock_threshold"),
             (F("stock_in_unit") + F("stock_carton") * F("units_per_carton")) > 0
@@ -349,6 +346,7 @@ class DashboardViewSet(viewsets.ViewSet):
             expire_date__gte=today, expire_date__lte=near_expiry_threshold
         ).count()
 
+        # ========== SALES SECTION ==========
         today_sales_qty = (
             SaleItem.objects.filter(sale__sale_date__date=today)
             .aggregate(total=Sum("quantity"))
@@ -358,10 +356,39 @@ class DashboardViewSet(viewsets.ViewSet):
 
         revenue_today = (
             Sale.objects.filter(sale_date__date=today)
-            .aggregate(revenue=Sum("total_amount"))
-            .get("revenue") or Decimal("0.00")
+            .aggregate(revenue=Coalesce(Sum("total_amount"), Value(0)))
+            .get("revenue")
         )
-        total_revenue = Sale.objects.aggregate(revenue=Sum("total_amount")).get("revenue") or Decimal("0.00")
+        total_revenue = (
+            Sale.objects.aggregate(revenue=Coalesce(Sum("total_amount"), Value(0)))
+            .get("revenue")
+        )
+
+        # ========== PROFIT SECTION ==========
+        today_profit = SaleItem.objects.filter(sale__sale_date__date=today).aggregate(
+            profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
+        )["profit"]
+
+        total_profit = SaleItem.objects.aggregate(
+            profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
+        )["profit"]
+
+        # ========== TOP SELLING MEDICINES ==========
+        top_selling = (
+            SaleItem.objects.values("medicine__brand_name")
+            .annotate(total_sold=Sum("quantity"))
+            .order_by("-total_sold")[:5]
+        )
+
+        # ========== DEPARTMENTS (CATEGORY) STATS ==========
+        departments = (
+            Medicine.objects.values("department__name")
+            .annotate(
+                total=Coalesce(Sum(F("stock_in_unit") + F("stock_carton") * F("units_per_carton")), Value(0)),
+                total_profit=Coalesce(Sum((F("price") - F("buying_price")) * (F("stock_in_unit") + F("stock_carton") * F("units_per_carton"))), Value(0))
+            )
+            .order_by("-total")
+        )
 
         return Response({
             "stock": {
@@ -377,8 +404,38 @@ class DashboardViewSet(viewsets.ViewSet):
                 "revenue_today": float(revenue_today),
                 "total_revenue": float(total_revenue),
             },
+            "profit": {
+                "today_profit": float(today_profit),
+                "total_profit": float(total_profit),
+            },
+            "top_selling": list(top_selling),
+            "departments": list(departments),
         })
 
+    # ----------------- PROFIT SUMMARY SECTION -----------------
+    @action(detail=False, methods=["get"])
+    def profit_summary(self, request):
+        today = now().date()
+        week_start = today - timedelta(days=7)
+        month_start = today.replace(day=1)
+
+        daily_profit = SaleItem.objects.filter(sale__sale_date__date=today).aggregate(
+            profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
+        )["profit"]
+
+        weekly_profit = SaleItem.objects.filter(sale__sale_date__date__gte=week_start).aggregate(
+            profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
+        )["profit"]
+
+        monthly_profit = SaleItem.objects.filter(sale__sale_date__date__gte=month_start).aggregate(
+            profit=Coalesce(Sum((F("price") - F("medicine__buying_price")) * F("quantity")), Value(0))
+        )["profit"]
+
+        return Response({
+            "daily_profit": float(daily_profit),
+            "weekly_profit": float(weekly_profit),
+            "monthly_profit": float(monthly_profit),
+        })
 
     # ----------------- ANALYTICS SECTION -----------------
     @action(detail=False, methods=["get"])
@@ -555,27 +612,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
 
     # ----------------- PROFIT SUMMARY SECTION -----------------
-    @action(detail=False, methods=["get"])
-    def profit_summary(self, request):
-        today = now().date()
-        week_ago = today - timedelta(days=7)
-        month_ago = today - timedelta(days=30)
 
-        # Profit from sale items: profit = (price - medicine.buying_price) * quantity
-        def calc_profit(qs):
-            return qs.annotate(
-                profit=(F("price") - F("medicine__buying_price")) * F("quantity")
-            ).aggregate(total=Sum("profit")).get("total") or Decimal("0.00")
-
-        daily_profit = calc_profit(SaleItem.objects.filter(sale__sale_date__date=today))
-        weekly_profit = calc_profit(SaleItem.objects.filter(sale__sale_date__date__gte=week_ago))
-        monthly_profit = calc_profit(SaleItem.objects.filter(sale__sale_date__date__gte=month_ago))
-
-        return Response({
-            "daily_profit": float(daily_profit),
-            "weekly_profit": float(weekly_profit),
-            "monthly_profit": float(monthly_profit),
-        })
 # -------------------- SETTINGS --------------------
 class SettingViewSet(viewsets.ModelViewSet):
     queryset = Setting.objects.all()
